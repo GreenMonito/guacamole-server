@@ -353,6 +353,16 @@ typedef struct guac_display_layer_cell {
      */
     guac_display_plan_operation* related_op;
 
+    /**
+     * Non-zero if this cell may have been sent to the client using lossy
+     * compression (JPEG or lossy WebP), or received its contents by copying
+     * from a region that may have been, and has not been resent losslessly
+     * since. Once the cell has gone unchanged for
+     * GUAC_DISPLAY_LOSSLESS_REFRESH_DELAY milliseconds, it is resent using
+     * lossless compression (see PFW_LFW_guac_display_plan_add_refresh()).
+     */
+    int lossy;
+
 } guac_display_layer_cell;
 
 /**
@@ -827,6 +837,15 @@ struct guac_display {
      * GUAC_DISPLAY_RENDER_STATE_FRAME_NOT_IN_PROGRESS values.
      */
     guac_flag render_state;
+
+    /**
+     * The earliest point in time that a cell sent with lossy compression
+     * becomes due for a lossless refresh, or zero if no such refresh is
+     * pending. Guarded by the pending_frame lock. The render thread uses this
+     * to end a frame on its own once the display has gone idle, so that the
+     * refresh is sent even if nothing else changes.
+     */
+    guac_timestamp lossless_refresh_due;
 
 };
 

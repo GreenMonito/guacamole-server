@@ -25,9 +25,11 @@
 #include "guacamole/fifo.h"
 #include "guacamole/mem.h"
 #include "guacamole/protocol.h"
+#include "guacamole/rect.h"
 #include "guacamole/socket.h"
 #include "guacamole/timestamp.h"
 
+#include <limits.h>
 #include <string.h>
 #include <cairo/cairo.h>
 
@@ -335,6 +337,7 @@ guac_display_plan* PFW_LFR_guac_display_plan_create(guac_display* display) {
                     current_op->dirty_size = cell->dirty_size;
                     current_op->last_frame = cell->last_frame;
                     current_op->current_frame = frame_end;
+                    current_op->lossless = 0;
 
                     cell->related_op = current_op;
                     cell->dirty_size = 0;
@@ -432,5 +435,206 @@ void guac_display_plan_apply(guac_display_plan* plan) {
     }
 
     guac_fifo_unlock(&display->ops);
+
+}
+
+/**
+ * Returns whether the given operation may result in lossy image data on the
+ * client: an IMG operation at a framerate where the worker threads may choose
+ * JPEG or lossy WebP, or a COPY operation (whose source may itself be lossy).
+ * This errs on the side of caution, as a needless refresh costs only one
+ * extra lossless image, while a missed one leaves the region blurry.
+ */
+static int guac_display_plan_op_may_be_lossy(const guac_display_plan_operation* op) {
+
+    if (op->type == GUAC_DISPLAY_PLAN_OPERATION_COPY)
+        return 1;
+
+    if (op->type != GUAC_DISPLAY_PLAN_OPERATION_IMG || op->lossless)
+        return 0;
+
+    /* Same framerate calculation as the worker threads */
+    int framerate = INT_MAX;
+    if (op->current_frame > op->last_frame)
+        framerate = 1000 / (op->current_frame - op->last_frame);
+
+    return framerate >= GUAC_DISPLAY_JPEG_FRAMERATE;
+
+}
+
+void PFW_guac_display_plan_mark_lossy(guac_display_plan* plan) {
+
+    guac_display_plan_operation* op = plan->ops;
+    for (size_t i = 0; i < plan->length; i++, op++) {
+
+        guac_display_layer* layer = op->layer;
+        if (layer == NULL || layer->pending_frame.lossless
+                || !guac_display_plan_op_may_be_lossy(op)
+                || guac_rect_is_empty(&op->dest))
+            continue;
+
+        int left = op->dest.left / GUAC_DISPLAY_CELL_SIZE;
+        int top = op->dest.top / GUAC_DISPLAY_CELL_SIZE;
+        int right = (op->dest.right - 1) / GUAC_DISPLAY_CELL_SIZE;
+        int bottom = (op->dest.bottom - 1) / GUAC_DISPLAY_CELL_SIZE;
+
+        if (left < 0) left = 0;
+        if (top < 0) top = 0;
+        if (right >= (int) layer->pending_frame_cells_width)
+            right = layer->pending_frame_cells_width - 1;
+        if (bottom >= (int) layer->pending_frame_cells_height)
+            bottom = layer->pending_frame_cells_height - 1;
+
+        for (int y = top; y <= bottom; y++) {
+            guac_display_layer_cell* cell = layer->pending_frame_cells
+                + (size_t) y * layer->pending_frame_cells_width + left;
+            for (int x = left; x <= right; x++, cell++)
+                cell->lossy = 1;
+        }
+
+    }
+
+}
+
+guac_display_plan* PFW_LFW_guac_display_plan_add_refresh(guac_display* display,
+        guac_display_plan* plan, int* added) {
+
+    guac_timestamp now = guac_timestamp_current();
+    guac_timestamp next_due = 0;
+    size_t count = 0;
+
+    *added = 0;
+
+    /* PASS 1: Count the runs of horizontally-adjacent cells that are due
+     * (each run becomes one operation), and find when the next cell that is
+     * not yet due will be */
+    for (guac_display_layer* current = display->pending_frame.layers;
+            current != NULL; current = current->pending_frame.next) {
+
+        if (current->pending_frame.buffer == NULL || current->pending_frame_cells == NULL)
+            continue;
+
+        guac_display_layer_cell* cell = current->pending_frame_cells;
+        for (size_t y = 0; y < current->pending_frame_cells_height; y++) {
+            int in_run = 0;
+            for (size_t x = 0; x < current->pending_frame_cells_width; x++, cell++) {
+
+                int due = 0;
+                if (cell->lossy) {
+                    guac_timestamp cell_due = cell->last_frame + GUAC_DISPLAY_LOSSLESS_REFRESH_DELAY;
+                    if (cell_due <= now)
+                        due = 1;
+                    else if (!next_due || cell_due < next_due)
+                        next_due = cell_due;
+                }
+
+                if (due && !in_run)
+                    count++;
+
+                in_run = due;
+
+            }
+        }
+
+    }
+
+    display->lossless_refresh_due = next_due;
+
+    if (!count)
+        return plan;
+
+    /* Allocate space for the new operations at the end of the plan */
+    size_t first;
+    if (plan == NULL) {
+        plan = guac_mem_alloc(sizeof(guac_display_plan));
+        plan->display = display;
+        plan->frame_end = now;
+        plan->length = count;
+        plan->ops = guac_mem_alloc(count, sizeof(guac_display_plan_operation));
+        first = 0;
+    }
+    else {
+        first = plan->length;
+        plan->length = guac_mem_ckd_add_or_die(plan->length, count);
+        plan->ops = guac_mem_realloc(plan->ops, plan->length, sizeof(guac_display_plan_operation));
+    }
+
+    /* PASS 2: Build one lossless IMG operation per run of due cells */
+    guac_display_plan_operation* op = plan->ops + first;
+    size_t built = 0;
+
+    for (guac_display_layer* current = display->pending_frame.layers;
+            current != NULL; current = current->pending_frame.next) {
+
+        if (current->pending_frame.buffer == NULL || current->pending_frame_cells == NULL)
+            continue;
+
+        guac_rect bounds = {
+            .left = 0,
+            .top = 0,
+            .right = current->last_frame.width,
+            .bottom = current->last_frame.height
+        };
+
+        guac_display_layer_cell* cell = current->pending_frame_cells;
+        for (size_t y = 0; y < current->pending_frame_cells_height; y++) {
+
+            int run_start = -1;
+            for (size_t x = 0; x <= current->pending_frame_cells_width; x++) {
+
+                int due = 0;
+                if (x < current->pending_frame_cells_width) {
+                    due = cell->lossy && cell->last_frame + GUAC_DISPLAY_LOSSLESS_REFRESH_DELAY <= now;
+                    if (due)
+                        cell->lossy = 0;
+                    cell++;
+                }
+
+                if (due && run_start < 0)
+                    run_start = x;
+
+                /* End of a run: emit it */
+                else if (!due && run_start >= 0) {
+
+                    guac_rect rect;
+                    guac_rect_init(&rect,
+                            run_start * GUAC_DISPLAY_CELL_SIZE,
+                            y * GUAC_DISPLAY_CELL_SIZE,
+                            (x - run_start) * GUAC_DISPLAY_CELL_SIZE,
+                            GUAC_DISPLAY_CELL_SIZE);
+                    guac_rect_constrain(&rect, &bounds);
+
+                    GUAC_ASSERT(built < count);
+
+                    /* Cells beyond the edge of a shrunk layer have nothing to
+                     * refresh */
+                    if (guac_rect_is_empty(&rect))
+                        op->type = GUAC_DISPLAY_PLAN_OPERATION_NOP;
+                    else {
+                        op->type = GUAC_DISPLAY_PLAN_OPERATION_IMG;
+                        guac_rect_extend(&current->last_frame.dirty, &rect);
+                        (*added)++;
+                    }
+
+                    op->layer = current;
+                    op->dest = rect;
+                    op->dirty_size = (size_t) guac_rect_width(&rect) * guac_rect_height(&rect);
+                    op->last_frame = now;
+                    op->current_frame = now;
+                    op->lossless = 1;
+
+                    op++;
+                    built++;
+                    run_start = -1;
+
+                }
+
+            }
+        }
+
+    }
+
+    GUAC_ASSERT(built == count);
+    return plan;
 
 }

@@ -22,6 +22,7 @@
 #include "guacamole/display.h"
 #include "guacamole/flag.h"
 #include "guacamole/mem.h"
+#include "guacamole/rwlock.h"
 #include "guacamole/thread.h"
 #include "guacamole/timestamp.h"
 
@@ -70,11 +71,35 @@ static void* guac_display_render_loop(void* data) {
 
         guac_display_render_thread_cursor_state cursor_state = render_thread->cursor_state;
 
-        /* Wait indefinitely for any change to the frame state */
-        guac_flag_wait_and_lock(&render_thread->state,
-                  GUAC_DISPLAY_RENDER_THREAD_STATE_STOPPING
-                | GUAC_DISPLAY_RENDER_THREAD_STATE_FRAME_READY
-                | GUAC_DISPLAY_RENDER_THREAD_STATE_FRAME_MODIFIED);
+        /* Wait for any change to the frame state. If a lossless refresh of
+         * lossy regions is pending, wait only until it is due, and then end
+         * a frame without changes so that the refresh is sent. */
+        guac_rwlock_acquire_read_lock(&display->pending_frame.lock);
+        guac_timestamp refresh_due = display->lossless_refresh_due;
+        guac_rwlock_release_lock(&display->pending_frame.lock);
+
+        if (refresh_due) {
+
+            int refresh_wait = refresh_due - guac_timestamp_current();
+            if (refresh_wait < GUAC_DISPLAY_RENDER_THREAD_MIN_FRAME_DURATION)
+                refresh_wait = GUAC_DISPLAY_RENDER_THREAD_MIN_FRAME_DURATION;
+
+            if (!guac_flag_timedwait_and_lock(&render_thread->state,
+                          GUAC_DISPLAY_RENDER_THREAD_STATE_STOPPING
+                        | GUAC_DISPLAY_RENDER_THREAD_STATE_FRAME_READY
+                        | GUAC_DISPLAY_RENDER_THREAD_STATE_FRAME_MODIFIED,
+                        refresh_wait)) {
+                guac_display_end_frame(display);
+                continue;
+            }
+
+        }
+
+        else
+            guac_flag_wait_and_lock(&render_thread->state,
+                      GUAC_DISPLAY_RENDER_THREAD_STATE_STOPPING
+                    | GUAC_DISPLAY_RENDER_THREAD_STATE_FRAME_READY
+                    | GUAC_DISPLAY_RENDER_THREAD_STATE_FRAME_MODIFIED);
 
         /* Bail out immediately upon upcoming disconnect */
         if (render_thread->state.value & GUAC_DISPLAY_RENDER_THREAD_STATE_STOPPING) {

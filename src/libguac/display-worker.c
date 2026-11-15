@@ -135,16 +135,18 @@ static int guac_display_suggest_quality(guac_client* client) {
 
     int lag = guac_client_get_processing_lag(client);
 
-    /* Scale quality linearly from 90 to 30 as lag varies from 20ms to 80ms */
-    int quality = 90 - (lag - 20);
+    /* Scale quality linearly from 90 to 70 as lag varies from 20ms to 80ms.
+     * Lower qualities turn dark areas of video into visible blocks, and
+     * static content no longer depends on this (lossless refresh). */
+    int quality = 90 - (lag - 20) / 3;
 
     /* Do not exceed 90 for quality */
     if (quality > 90)
         return 90;
 
-    /* Do not go below 30 for quality */
-    if (quality < 30)
-        return 30;
+    /* Do not go below 70 for quality */
+    if (quality < 70)
+        return 70;
 
     return quality;
 
@@ -351,8 +353,13 @@ void* guac_display_worker_thread(void* data) {
                  * with alpha transparency */
                 guac_display_layer_clear_non_opaque(display_layer, dirty);
 
+                /* Lossless refresh of a region previously sent lossily */
+                if (op.lossless)
+                    guac_client_stream_png(client, socket, GUAC_COMP_OVER,
+                            layer, dirty->left, dirty->top, rect);
+
                 /* Prefer WebP when reasonable */
-                if (LFR_guac_display_layer_should_use_webp(display_layer, dirty, framerate))
+                else if (LFR_guac_display_layer_should_use_webp(display_layer, dirty, framerate))
                     guac_client_stream_webp(client, socket, GUAC_COMP_OVER, layer,
                             dirty->left, dirty->top, rect,
                             guac_display_suggest_quality(client),

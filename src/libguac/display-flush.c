@@ -362,6 +362,10 @@ void guac_display_end_multiple_frames(guac_display* display, int frames) {
         GUAC_DISPLAY_PLAN_BEGIN_PHASE();
         PFW_guac_display_plan_combine_horizontally(plan);
         PFW_guac_display_plan_combine_vertically(plan);
+
+        /* Remember what may end up lossy on the client, for a later lossless
+         * refresh */
+        PFW_guac_display_plan_mark_lossy(plan);
         GUAC_DISPLAY_PLAN_END_PHASE(display, "combine", 4, 5);
 
     }
@@ -378,6 +382,16 @@ void guac_display_end_multiple_frames(guac_display* display, int frames) {
     GUAC_DISPLAY_PLAN_BEGIN_PHASE();
     frame_nonempty = PFW_LFW_guac_display_frame_complete(display);
     GUAC_DISPLAY_PLAN_END_PHASE(display, "commit", 5, 5);
+
+    /* Resend losslessly whatever was sent lossily and has since stopped
+     * changing (this may be the only content of the frame) */
+    int refreshed;
+    plan = PFW_LFW_guac_display_plan_add_refresh(display, plan, &refreshed);
+    if (refreshed) {
+        frame_nonempty = 1;
+        guac_client_log(display->client, GUAC_LOG_TRACE, "Lossless refresh: "
+                "%i region(s).", refreshed);
+    }
 
     guac_rwlock_release_lock(&display->last_frame.lock);
 

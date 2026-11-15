@@ -83,6 +83,15 @@
 #define GUAC_DISPLAY_JPEG_MIN_BITMAP_SIZE 4096
 
 /**
+ * The number of milliseconds that a region sent with lossy compression must
+ * remain unchanged before it is resent losslessly. Lossy compression is used
+ * for regions that change frequently (video, animations, scrolling); without
+ * a refresh, whatever was last sent lossily (icons, text) stays blurry until
+ * it happens to be redrawn.
+ */
+#define GUAC_DISPLAY_LOSSLESS_REFRESH_DELAY 300
+
+/**
  * The JPEG compression min block size, as the exponent of a power of two. This
  * defines the optimal rectangle block size factor for JPEG compression.
  * Usually 8x8 would suffice, but we use 16x16 here to reduce the occurrence of
@@ -204,6 +213,14 @@ typedef struct guac_display_plan_operation {
      * server at the time this operation was added to the plan.
      */
     guac_timestamp current_frame;
+
+    /**
+     * Non-zero if this operation is a lossless refresh of a region previously
+     * sent with lossy compression, in which case the image MUST be encoded
+     * losslessly regardless of framerate. Applies only to
+     * GUAC_DISPLAY_PLAN_OPERATION_IMG operations.
+     */
+    int lossless;
 
     union {
 
@@ -390,5 +407,43 @@ void PFW_guac_display_plan_combine_vertically(guac_display_plan* plan);
  *     The guac_display_plan to apply.
  */
 void guac_display_plan_apply(guac_display_plan* plan);
+
+/**
+ * Marks the cells touched by every operation in the given plan that may be
+ * encoded with lossy compression (or that copies data that may have been) as
+ * needing a lossless refresh. This MUST be called after all other passes over
+ * the plan, as combining operations changes their apparent framerate.
+ *
+ * @param plan
+ *     The display plan whose operations should be inspected.
+ */
+void PFW_guac_display_plan_mark_lossy(guac_display_plan* plan);
+
+/**
+ * Appends lossless refresh operations for every cell that was sent with lossy
+ * compression and has since remained unchanged for at least
+ * GUAC_DISPLAY_LOSSLESS_REFRESH_DELAY milliseconds, updating
+ * lossless_refresh_due for the cells that are not yet due. This MUST be called
+ * after the frame has been committed to last_frame, while still holding the
+ * write locks of both pending_frame and last_frame. The dirty rect of each
+ * refreshed layer's last_frame is extended to cover the refreshed regions, so
+ * that the client-side backing buffer is refreshed, too.
+ *
+ * @param display
+ *     The display whose layers should be checked.
+ *
+ * @param plan
+ *     The plan to append to, or NULL if this frame has no plan yet.
+ *
+ * @param added
+ *     Set to the number of refresh operations appended.
+ *
+ * @return
+ *     The plan containing the refresh operations, which is the given plan or
+ *     a newly-allocated one (or NULL if the given plan was NULL and nothing
+ *     is due).
+ */
+guac_display_plan* PFW_LFW_guac_display_plan_add_refresh(guac_display* display,
+        guac_display_plan* plan, int* added);
 
 #endif
