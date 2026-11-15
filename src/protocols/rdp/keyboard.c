@@ -29,6 +29,12 @@
 #include <guacamole/rwlock.h>
 
 #include <stdlib.h>
+#include <unistd.h>
+
+/**
+ * How long to pause after sending an RDP synchronize event, in microseconds.
+ */
+#define GUAC_RDP_SYNCHRONIZE_DELAY 100000
 
 /**
  * Translates the given keysym into the corresponding lock flag, as would be
@@ -170,6 +176,14 @@ static void guac_rdp_send_synchronize_event(guac_rdp_client* rdp_client,
     GUAC_RDP_CONTEXT(rdp_inst)->input->SynchronizeEvent(
             GUAC_RDP_CONTEXT(rdp_inst)->input, flags);
     pthread_mutex_unlock(&(rdp_client->message_lock));
+
+    /* Give the server time to apply the new lock state before any further
+     * key events. GNOME Remote Desktop applies synchronize events
+     * asynchronously (after flushing its input queue) but injects the key
+     * events that follow immediately, so without this pause a keypad digit
+     * sent right after Num Lock is enabled arrives as an arrow key. Lock
+     * changes are rare, so the pause is not noticeable. */
+    usleep(GUAC_RDP_SYNCHRONIZE_DELAY);
 
 }
 
@@ -678,9 +692,22 @@ int guac_rdp_keyboard_update_keysym(guac_rdp_keyboard* keyboard,
      * state is changing (or if server-side state of this key is untracked) */
     if (key == NULL || (pressed && key->pressed == NULL) || (!pressed && key->pressed != NULL)) {
 
-        /* Toggle locks on keydown */
-        if (pressed)
-            keyboard->lock_flags ^= guac_rdp_keyboard_lock_flag(keysym);
+        /* Lock keys are sent as synchronize events, which set the remote
+         * lock state absolutely, rather than as key presses, which toggle
+         * it. guacd cannot know the remote lock state if the server never
+         * reports it (GNOME Remote Desktop doesn't), and a toggle based on a
+         * wrong guess leaves Caps Lock or Num Lock inverted. */
+        int lock_flag = guac_rdp_keyboard_lock_flag(keysym);
+        if (lock_flag != 0) {
+            if (pressed) {
+                keyboard->lock_flags ^= lock_flag;
+                guac_rdp_send_synchronize_event((guac_rdp_client*) keyboard->client->data,
+                        keyboard->lock_flags);
+            }
+            if (key != NULL)
+                key->pressed = NULL;
+            goto key_sent;
+        }
 
         /* If key is known, update state and attempt to send using normal RDP key
          * events */
@@ -698,6 +725,8 @@ int guac_rdp_keyboard_update_keysym(guac_rdp_keyboard* keyboard,
         }
 
     }
+
+key_sent:
 
     /* Reset RDP server keyboard state (releasing any automatically
      * pressed keys) once all keys have been released on the client
