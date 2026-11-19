@@ -74,7 +74,7 @@ ARG FREERDP_OPTS="\
     -DWITH_CLIENT=ON \
     -DWITH_CUPS=OFF \
     -DWITH_DIRECTFB=OFF \
-    -DWITH_FFMPEG=OFF \
+    -DWITH_FFMPEG=ON \
     -DWITH_FUSE=OFF \
     -DWITH_GSM=OFF \
     -DWITH_GSSAPI=OFF \
@@ -171,6 +171,7 @@ RUN apk add --no-cache                \
         cjson-dev                     \
         cmake                         \
         cunit-dev                     \
+        ffmpeg-dev                    \
         git                           \
         grep                          \
         krb5-dev                      \

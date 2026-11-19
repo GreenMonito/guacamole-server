@@ -1587,6 +1587,14 @@ void guac_rdp_push_settings(guac_client* client,
         freerdp_settings_set_bool(rdp_settings, FreeRDP_SupportGraphicsPipeline, TRUE);
         freerdp_settings_set_bool(rdp_settings, FreeRDP_RemoteFxCodec, TRUE);
 
+        /* Advertise H.264 (AVC420 and AVC444/AVC444v2) so servers that
+         * encode with hardware (e.g. GNOME Remote Desktop over VA-API) can
+         * use it instead of RemoteFX. Only effective if FreeRDP was built
+         * with an H.264 decoder (FFmpeg or OpenH264). */
+        freerdp_settings_set_bool(rdp_settings, FreeRDP_GfxH264, TRUE);
+        freerdp_settings_set_bool(rdp_settings, FreeRDP_GfxAVC444, TRUE);
+        freerdp_settings_set_bool(rdp_settings, FreeRDP_GfxAVC444v2, TRUE);
+
         if (freerdp_settings_get_uint32(rdp_settings, FreeRDP_ColorDepth) != RDP_GFX_REQUIRED_DEPTH) {
             guac_client_log(client, GUAC_LOG_WARNING, "Ignoring requested "
                     "color depth of %i bpp, as the RDP Graphics Pipeline "
@@ -1821,6 +1829,11 @@ void guac_rdp_push_settings(guac_client* client,
 
         rdp_settings->SupportGraphicsPipeline = TRUE;
         rdp_settings->RemoteFxCodec = TRUE;
+
+        /* Advertise H.264 (see the setters/getters branch above) */
+        rdp_settings->GfxH264 = TRUE;
+        rdp_settings->GfxAVC444 = TRUE;
+        rdp_settings->GfxAVC444v2 = TRUE;
 
         if (rdp_settings->ColorDepth != RDP_GFX_REQUIRED_DEPTH) {
             guac_client_log(client, GUAC_LOG_WARNING, "Ignoring requested "
