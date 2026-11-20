@@ -567,6 +567,24 @@ void guac_display_layer_set_opacity(guac_display_layer* layer, int opacity);
 void guac_display_layer_set_lossless(guac_display_layer* layer, int lossless);
 
 /**
+ * Streams the default layer of the given display as video instead of image
+ * updates, if the owner of the connection supports it (it advertised
+ * "video/h264" during the handshake) and guacd was built with FFmpeg. Should
+ * be called once, after the owner has joined and before the first frame.
+ *
+ * @param display
+ *     The guac_display whose default layer should be streamed as video.
+ *
+ * @param codec
+ *     The codec to use. Only "h264" is supported.
+ *
+ * @return
+ *     Zero if video streaming was enabled, non-zero if the default layer will
+ *     continue to be sent as images.
+ */
+int guac_display_enable_video(guac_display* display, const char* codec);
+
+/**
  * Sets the level of multitouch support available for the given layer. The
  * change in layer multitouch support will be made as part of the current
  * pending frame, and will not take effect on remote displays until the pending

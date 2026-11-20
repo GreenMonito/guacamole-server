@@ -134,6 +134,11 @@ static int guac_rdp_join_pending_handler(guac_client* client) {
     if (rdp_client->display != NULL) {
         guac_display_dup(rdp_client->display, broadcast_socket);
         guac_socket_flush(broadcast_socket);
+
+        /* Wake the render thread so that a video stream (if any) is
+         * restarted for the joining users even on an idle display */
+        if (rdp_client->render_thread != NULL)
+            guac_display_render_thread_notify_modified(rdp_client->render_thread);
     }
 
     guac_rwlock_release_lock(&(rdp_client->lock));

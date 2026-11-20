@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include "config.h"
 #include "display-plan.h"
 #include "display-priv.h"
 #include "guacamole/assert.h"
@@ -29,6 +30,10 @@
 #include "guacamole/rect.h"
 #include "guacamole/rwlock.h"
 #include "guacamole/user.h"
+
+#ifdef ENABLE_VIDEO_STREAMING
+#include "display-video.h"
+#endif
 
 #include <string.h>
 
@@ -392,6 +397,22 @@ void guac_display_end_multiple_frames(guac_display* display, int frames) {
         guac_client_log(display->client, GUAC_LOG_TRACE, "Lossless refresh: "
                 "%i region(s).", refreshed);
     }
+
+#ifdef ENABLE_VIDEO_STREAMING
+    /* Stream the default layer as video, if enabled (that layer is left out
+     * of the plan), and wake up again when the encoder needs it to */
+    if (display->video != NULL) {
+
+        if (PFW_LFW_guac_display_video_flush(display))
+            frame_nonempty = 1;
+
+        guac_timestamp video_due = guac_display_video_due(display);
+        if (video_due && (!display->lossless_refresh_due
+                    || video_due < display->lossless_refresh_due))
+            display->lossless_refresh_due = video_due;
+
+    }
+#endif
 
     guac_rwlock_release_lock(&display->last_frame.lock);
 

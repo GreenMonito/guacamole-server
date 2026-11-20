@@ -187,6 +187,12 @@ libguac_la_SOURCES += encode-webp.c
 noinst_HEADERS += encode-webp.h
 endif
 
+# Video streaming of the display (H.264)
+if ENABLE_VIDEO_STREAMING
+libguac_la_SOURCES += display-video.c
+noinst_HEADERS += display-video.h
+endif
+
 # SSL support
 if ENABLE_SSL
 libguac_la_SOURCES += socket-ssl.c
@@ -200,7 +206,10 @@ libguacinc_HEADERS += guacamole/socket-wsa.h
 endif
 
 libguac_la_CFLAGS = \
-    -Werror -Wall -pedantic
+    -Werror -Wall -pedantic \
+    @AVCODEC_CFLAGS@        \
+    @AVUTIL_CFLAGS@         \
+    @SWSCALE_CFLAGS@
 
 libguac_la_LDFLAGS =     \
     -version-info 26:0:1 \
@@ -215,4 +224,7 @@ libguac_la_LDFLAGS =     \
     @UUID_LIBS@          \
     @VORBIS_LIBS@        \
     @WEBP_LIBS@          \
-    @WINSOCK_LIBS@
+    @WINSOCK_LIBS@       \
+    @AVCODEC_LIBS@       \
+    @AVUTIL_LIBS@        \
+    @SWSCALE_LIBS@

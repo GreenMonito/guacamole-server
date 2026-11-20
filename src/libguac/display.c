@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include "config.h"
 #include "display-plan.h"
 #include "display-priv.h"
 #include "guacamole/client.h"
@@ -31,6 +32,10 @@
 #include "guacamole/thread.h"
 #include "guacamole/timestamp.h"
 #include "guacamole/user.h"
+
+#ifdef ENABLE_VIDEO_STREAMING
+#include "display-video.h"
+#endif
 
 #ifdef __MINGW32__
 #include <winbase.h>
@@ -216,6 +221,10 @@ void guac_display_free(guac_display* display) {
 
     guac_display_stop(display);
 
+#ifdef ENABLE_VIDEO_STREAMING
+    guac_display_video_free(display);
+#endif
+
     /* All locks, FIFOs, etc. are now unused and can be safely destroyed */
     guac_flag_destroy(&display->render_state);
     guac_fifo_destroy(&display->ops);
@@ -237,10 +246,26 @@ void guac_display_free(guac_display* display) {
 
 }
 
+#ifndef ENABLE_VIDEO_STREAMING
+int guac_display_enable_video(guac_display* display, const char* codec) {
+    guac_client_log(display->client, GUAC_LOG_WARNING, "guacd was built "
+            "without video streaming support. Graphical updates will be sent "
+            "as images.");
+    return 1;
+}
+#endif
+
 void guac_display_dup(guac_display* display, guac_socket* socket) {
 
     guac_client* client = display->client;
     guac_rwlock_acquire_read_lock(&display->last_frame.lock);
+
+#ifdef ENABLE_VIDEO_STREAMING
+    /* Joining users get the current state of the default layer as an image
+     * below, and the video stream restarts with a keyframe once they have
+     * been promoted from pending */
+    guac_display_video_request_restart(display);
+#endif
 
     /* Wait for any pending frame to finish being sent to established users of
      * the connection before syncing any new users (doing otherwise could

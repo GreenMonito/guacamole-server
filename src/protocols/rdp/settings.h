@@ -218,6 +218,12 @@ typedef struct guac_rdp_settings {
     int lossless;
 
     /**
+     * The codec to stream the display with as video ("h264"), or NULL to send
+     * images as usual.
+     */
+    char* video_codec;
+
+    /**
      * Whether audio is enabled.
      */
     int audio_enabled;

@@ -821,6 +821,11 @@ static int guac_rdp_handle_connection(guac_client* client) {
      * heuristics) */
     guac_display_layer_set_lossless(default_layer, settings->lossless);
 
+    /* Stream the display as video instead, if requested and supported by the
+     * owner's client */
+    if (settings->video_codec != NULL && settings->video_codec[0] != '\0')
+        guac_display_enable_video(rdp_client->display, settings->video_codec);
+
     rdp_client->current_surface = default_layer;
 
     rdp_client->available_svc = guac_common_list_alloc();

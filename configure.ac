@@ -1435,6 +1435,22 @@ AM_CONDITIONAL([ENABLE_WEBP], [test "x${have_webp}" = "xyes"])
 AC_SUBST(WEBP_LIBS)
 
 #
+# Video streaming of the display (H.264 through libavcodec/libx264)
+#
+
+have_video_streaming=no
+if test "x${have_libavcodec}" = "xyes" \
+     -a "x${have_libavutil}"  = "xyes" \
+     -a "x${have_libswscale}" = "xyes"
+then
+    have_video_streaming=yes
+    AC_DEFINE([ENABLE_VIDEO_STREAMING],,
+              [Whether the display can be streamed as H.264 video])
+fi
+
+AM_CONDITIONAL([ENABLE_VIDEO_STREAMING], [test "x${have_video_streaming}" = "xyes"])
+
+#
 # libwebsockets
 #
 
@@ -1652,6 +1668,7 @@ $PACKAGE_NAME version $PACKAGE_VERSION
      libpulse ............ ${have_pulse}
      libwebsockets ....... ${have_libwebsockets}
      libwebp ............. ${have_webp}
+     video streaming ..... ${have_video_streaming}
      wsock32 ............. ${have_winsock}
 
    Protocol support:

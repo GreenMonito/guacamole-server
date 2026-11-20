@@ -172,6 +172,14 @@ guac_display_plan* PFW_LFR_guac_display_plan_create(guac_display* display) {
             continue;
         }
 
+        /* The default layer is sent as video instead, when enabled (its dirty
+         * region is still committed to the last frame, where the video
+         * encoder reads it) */
+        if (display->video != NULL && current == display->default_layer) {
+            current = current->pending_frame.next;
+            continue;
+        }
+
         /* Flush any outstanding Cairo operations before directly accessing buffer */
         guac_display_layer_cairo_context* cairo_context = &(current->pending_frame_cairo_context);
         if (cairo_context->surface != NULL)

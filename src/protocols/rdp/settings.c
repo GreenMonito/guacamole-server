@@ -152,6 +152,7 @@ const char* GUAC_RDP_CLIENT_ARGS[] = {
 
     "force-lossless",
     "normalize-clipboard",
+    "video-codec",
     NULL
 };
 
@@ -739,6 +740,13 @@ enum RDP_ARGS_IDX {
      */
     IDX_NORMALIZE_CLIPBOARD,
 
+    /**
+     * The codec to stream the display with as video instead of images, if the
+     * client supports it. Only "h264" is supported. Blank (the default) sends
+     * images as usual.
+     */
+    IDX_VIDEO_CODEC,
+
     RDP_ARGS_COUNT
 };
 
@@ -914,6 +922,11 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
     settings->lossless =
         guac_user_parse_args_boolean(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_FORCE_LOSSLESS, 0);
+
+    /* Video streaming of the display */
+    settings->video_codec =
+        guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
+                IDX_VIDEO_CODEC, NULL);
 
     /* Domain */
     settings->domain =
@@ -1411,6 +1424,7 @@ void guac_rdp_settings_free(guac_rdp_settings* settings) {
     /* Free settings strings */
     guac_mem_free(settings->client_name);
     guac_mem_free(settings->domain);
+    guac_mem_free(settings->video_codec);
     guac_mem_free(settings->drive_name);
     guac_mem_free(settings->drive_path);
     guac_mem_free(settings->hostname);

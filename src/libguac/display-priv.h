@@ -847,6 +847,13 @@ struct guac_display {
      */
     guac_timestamp lossless_refresh_due;
 
+    /**
+     * The H.264 encoder streaming the default layer as video, or NULL if the
+     * default layer is sent as images (the default). See display-video.h.
+     * Changed only while holding the write locks of both frames.
+     */
+    struct guac_display_video* video;
+
 };
 
 /**
