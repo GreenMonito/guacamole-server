@@ -25,14 +25,20 @@
  * the client through the "video" instruction instead of as image updates.
  *
  * Each encoded access unit is sent within the video stream (split across as
- * many blobs as needed) prefixed by a 9-byte header:
+ * many blobs as needed) prefixed by a header:
  *
- *     bytes 0-3   length of the access unit that follows (uint32, big endian)
- *     byte  4     flags (bit 0 set if the access unit is a keyframe)
- *     bytes 5-8   timestamp in milliseconds (uint32, big endian)
+ *     bytes 0-3    length of the access unit that follows (uint32, big endian)
+ *     byte  4      flags (bit 0 set if the access unit is a keyframe)
+ *     bytes 5-8    timestamp in milliseconds (uint32, big endian)
+ *     bytes 9-10   number of changed regions N (uint16, big endian)
+ *     then N * 8   each region: x, y, width, height (uint16 each, big endian)
  *
  * The access unit itself is H.264 in Annex B format, with SPS/PPS repeated
- * before every keyframe.
+ * before every keyframe. The regions are the 64x64 cells that actually
+ * changed (merged into rectangles), and the client draws only those parts of
+ * each decoded frame. Everything drawn from video is marked lossy, so the regular
+ * lossless refresh resends it as images once it stops changing: motion is
+ * video, and static content (text, icons) ends up pixel-exact.
  *
  * @file display-video.h
  */
@@ -47,16 +53,10 @@
 #define GUAC_DISPLAY_VIDEO_MIMETYPE "video/h264"
 
 /**
- * The size of the header preceding each access unit, in bytes.
+ * The size of the fixed part of the header preceding each access unit, in
+ * bytes (8 more bytes follow per changed region).
  */
-#define GUAC_DISPLAY_VIDEO_HEADER_SIZE 9
-
-/**
- * The amount of time the default layer must remain unchanged before the last
- * frame is encoded once more at higher quality, in milliseconds. This keeps
- * text and other static content sharp once motion stops.
- */
-#define GUAC_DISPLAY_VIDEO_REFINE_DELAY 300
+#define GUAC_DISPLAY_VIDEO_HEADER_SIZE 11
 
 /**
  * The amount of time to wait after a new user joins before restarting the
@@ -72,10 +72,11 @@ typedef struct guac_display_video guac_display_video;
 
 /**
  * Encodes and sends the current contents of the default layer as video, if
- * that layer has changed since the last frame, if a refinement of the last
- * frame is due, or if the stream must be restarted. Must be called while
- * holding the write locks of both the pending and last frames, after the
- * pending frame has been committed to the last frame.
+ * that layer has changed since the last frame or the stream must be
+ * restarted. Must be called while holding the write locks of both the pending
+ * and last frames, after the pending frame has been committed to the last
+ * frame and BEFORE the lossless refresh is added (the refresh extends the
+ * layer's dirty region, which must not be mistaken for a change).
  *
  * @param display
  *     The guac_display whose default layer should be encoded.
@@ -88,7 +89,7 @@ int PFW_LFW_guac_display_video_flush(guac_display* display);
 
 /**
  * Returns when the video encoder next needs the display to end a frame even
- * if nothing changes (for a refinement or a restart), or zero if it doesn't.
+ * if nothing changes (for a stream restart), or zero if it doesn't.
  *
  * @param display
  *     The guac_display to check.

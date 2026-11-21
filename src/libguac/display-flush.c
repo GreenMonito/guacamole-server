@@ -388,6 +388,19 @@ void guac_display_end_multiple_frames(guac_display* display, int frames) {
     frame_nonempty = PFW_LFW_guac_display_frame_complete(display);
     GUAC_DISPLAY_PLAN_END_PHASE(display, "commit", 5, 5);
 
+#ifdef ENABLE_VIDEO_STREAMING
+    /* Stream the default layer as video, if enabled (that layer is left out
+     * of the plan). This must happen before the lossless refresh below, which
+     * extends dirty regions, and which then resends as images whatever was
+     * drawn from video once it stops changing. */
+    if (display->video != NULL) {
+
+        if (PFW_LFW_guac_display_video_flush(display))
+            frame_nonempty = 1;
+
+    }
+#endif
+
     /* Resend losslessly whatever was sent lossily and has since stopped
      * changing (this may be the only content of the frame) */
     int refreshed;
@@ -399,20 +412,16 @@ void guac_display_end_multiple_frames(guac_display* display, int frames) {
     }
 
 #ifdef ENABLE_VIDEO_STREAMING
-    /* Stream the default layer as video, if enabled (that layer is left out
-     * of the plan), and wake up again when the encoder needs it to */
+    /* Wake up again when the video stream must be restarted (the refresh
+     * above has just recalculated when it next needs to wake up) */
     if (display->video != NULL) {
-
-        if (PFW_LFW_guac_display_video_flush(display))
-            frame_nonempty = 1;
-
         guac_timestamp video_due = guac_display_video_due(display);
         if (video_due && (!display->lossless_refresh_due
                     || video_due < display->lossless_refresh_due))
             display->lossless_refresh_due = video_due;
-
     }
 #endif
+
 
     guac_rwlock_release_lock(&display->last_frame.lock);
 

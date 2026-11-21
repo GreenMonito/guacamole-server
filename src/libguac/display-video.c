@@ -53,16 +53,16 @@
 #define GUAC_DISPLAY_VIDEO_CRF 23
 
 /**
- * Default constant rate factor for the refinement pass sent once the screen
- * stops changing. Overridable with GUACD_VIDEO_REFINE_CRF.
- */
-#define GUAC_DISPLAY_VIDEO_REFINE_CRF 12
-
-/**
  * Default bitrate cap (VBV max rate), in kbit/s. Overridable with
  * GUACD_VIDEO_MAXRATE.
  */
 #define GUAC_DISPLAY_VIDEO_MAXRATE 30000
+
+/**
+ * Maximum number of changed regions sent with a frame. Beyond this, the
+ * bounding box of all changes is sent instead.
+ */
+#define GUAC_DISPLAY_VIDEO_MAX_REGIONS 128
 
 /**
  * Maximum number of frames between keyframes. Keyframes are otherwise only
@@ -101,6 +101,18 @@ struct guac_display_video {
     int height;
 
     /**
+     * Copy of the layer as of the last encoded frame (32-bit pixels, rows of
+     * width * 4 bytes), used to find exactly which cells changed.
+     */
+    unsigned char* previous;
+
+    /**
+     * The regions that changed in the frame being encoded, and how many.
+     */
+    guac_rect regions[GUAC_DISPLAY_VIDEO_MAX_REGIONS];
+    int region_count;
+
+    /**
      * The stream carrying the video, or NULL if no stream has been started.
      */
     guac_stream* stream;
@@ -123,12 +135,6 @@ struct guac_display_video {
     int force_keyframe;
 
     /**
-     * When the last frame becomes due for a refinement pass, or zero if no
-     * refinement is pending.
-     */
-    guac_timestamp refine_due;
-
-    /**
      * When the stream should be restarted for a joining user, or zero if no
      * restart is pending. Guarded by restart_lock.
      */
@@ -144,7 +150,6 @@ struct guac_display_video {
      * Encoding settings.
      */
     int crf;
-    int refine_crf;
     int maxrate;
 
     /**
@@ -221,8 +226,6 @@ int guac_display_enable_video(guac_display* display, const char* codec) {
     video->force_keyframe = 1;
     video->crf = guac_display_video_env_int("GUACD_VIDEO_CRF",
             GUAC_DISPLAY_VIDEO_CRF, 0, 51);
-    video->refine_crf = guac_display_video_env_int("GUACD_VIDEO_REFINE_CRF",
-            GUAC_DISPLAY_VIDEO_REFINE_CRF, 0, 51);
     video->maxrate = guac_display_video_env_int("GUACD_VIDEO_MAXRATE",
             GUAC_DISPLAY_VIDEO_MAXRATE, 1000, 500000);
 
@@ -233,8 +236,9 @@ int guac_display_enable_video(guac_display* display, const char* codec) {
     guac_rwlock_release_lock(&display->pending_frame.lock);
 
     guac_client_log(client, GUAC_LOG_INFO, "Graphical updates of the default "
-            "layer will be streamed as H.264 video (crf %i, refine crf %i, "
-            "max %i kbit/s).", video->crf, video->refine_crf, video->maxrate);
+            "layer will be streamed as H.264 video (crf %i, max %i kbit/s), "
+            "with lossless refresh of regions that stop changing.",
+            video->crf, video->maxrate);
 
     return 0;
 
@@ -251,6 +255,8 @@ static void guac_display_video_close_encoder(guac_display_video* video) {
     av_packet_free(&video->packet);
     sws_freeContext(video->sws);
     video->sws = NULL;
+    guac_mem_free(video->previous);
+    video->previous = NULL;
     video->width = 0;
     video->height = 0;
 
@@ -366,6 +372,7 @@ static int guac_display_video_open_encoder(guac_display* display, int width, int
     sws_setColorspaceDetails(sws, coefficients, 1, coefficients, 0,
             0, 1 << 16, 1 << 16);
 
+    video->previous = guac_mem_zalloc(guac_mem_ckd_mul_or_die(width, height, 4));
     video->context = context;
     video->frame = frame;
     video->packet = packet;
@@ -414,7 +421,8 @@ static void guac_display_video_send_packet(guac_display* display, AVPacket* pack
     guac_display_video* video = display->video;
     guac_client* client = display->client;
 
-    size_t total = (size_t) packet->size + GUAC_DISPLAY_VIDEO_HEADER_SIZE;
+    size_t header = GUAC_DISPLAY_VIDEO_HEADER_SIZE + (size_t) video->region_count * 8;
+    size_t total = header + (size_t) packet->size;
     unsigned char* data = guac_mem_alloc(total);
 
     uint32_t length = (uint32_t) packet->size;
@@ -429,12 +437,168 @@ static void guac_display_video_send_packet(guac_display* display, AVPacket* pack
     data[6] = (timestamp >> 16) & 0xFF;
     data[7] = (timestamp >> 8) & 0xFF;
     data[8] = timestamp & 0xFF;
-    memcpy(data + GUAC_DISPLAY_VIDEO_HEADER_SIZE, packet->data, packet->size);
+    data[9] = (video->region_count >> 8) & 0xFF;
+    data[10] = video->region_count & 0xFF;
+
+    /* Regions of the frame that changed (the only parts the client draws) */
+    unsigned char* current = data + GUAC_DISPLAY_VIDEO_HEADER_SIZE;
+    for (int i = 0; i < video->region_count; i++) {
+        const guac_rect* rect = &video->regions[i];
+        int values[4] = { rect->left, rect->top,
+            guac_rect_width(rect), guac_rect_height(rect) };
+        for (int v = 0; v < 4; v++) {
+            *(current++) = (values[v] >> 8) & 0xFF;
+            *(current++) = values[v] & 0xFF;
+        }
+    }
+
+    memcpy(data + header, packet->data, packet->size);
 
     guac_protocol_send_blobs(client->socket, video->stream, data, (int) total);
     guac_mem_free(data);
 
     video->stats_bytes += total;
+
+}
+
+/**
+ * Returns whether the given cell-aligned rectangle of the layer differs
+ * between the layer's last frame and the copy of the last encoded frame.
+ */
+static int guac_display_video_rect_differs(guac_display* display, const guac_rect* rect) {
+
+    guac_display_video* video = display->video;
+    guac_display_layer* layer = display->default_layer;
+
+    size_t row_length = (size_t) guac_rect_width(rect) * 4;
+    size_t previous_stride = (size_t) video->width * 4;
+
+    for (int y = rect->top; y < rect->bottom; y++) {
+        const unsigned char* a = layer->last_frame.buffer
+            + (size_t) y * layer->last_frame.buffer_stride + (size_t) rect->left * 4;
+        const unsigned char* b = video->previous
+            + (size_t) y * previous_stride + (size_t) rect->left * 4;
+        if (memcmp(a, b, row_length) != 0)
+            return 1;
+    }
+
+    return 0;
+
+}
+
+/**
+ * Adds a horizontal run of changed cells to video->regions, extending a
+ * region from the row above if it spans exactly the same columns.
+ *
+ * @return
+ *     Non-zero if there was no room left for the run, zero otherwise.
+ */
+static int guac_display_video_add_region(guac_display_video* video, const guac_rect* run) {
+
+    for (int i = video->region_count - 1; i >= 0; i--) {
+        guac_rect* region = &video->regions[i];
+        if (region->bottom == run->top && region->left == run->left
+                && region->right == run->right) {
+            region->bottom = run->bottom;
+            return 0;
+        }
+    }
+
+    if (video->region_count >= GUAC_DISPLAY_VIDEO_MAX_REGIONS)
+        return 1;
+
+    video->regions[video->region_count++] = *run;
+    return 0;
+
+}
+
+/**
+ * Finds the 64x64 cells within the given region that actually changed since
+ * the last encoded frame, and stores them in video->regions as rectangles
+ * (horizontal runs of changed cells, merged vertically where they line up).
+ * The copy of the last encoded frame is then updated.
+ */
+static void guac_display_video_find_regions(guac_display* display,
+        const guac_rect* dirty, const guac_rect* bounds, int full) {
+
+    guac_display_video* video = display->video;
+    guac_display_layer* layer = display->default_layer;
+    size_t previous_stride = (size_t) video->width * 4;
+
+    video->region_count = 0;
+
+    if (full) {
+        video->regions[0] = *bounds;
+        video->region_count = 1;
+    }
+
+    else {
+
+        guac_rect area = *dirty;
+        guac_rect_align(&area, GUAC_DISPLAY_CELL_SIZE_EXPONENT);
+        guac_rect_constrain(&area, bounds);
+
+        int overflow = 0;
+
+        for (int top = area.top; top < area.bottom; top += GUAC_DISPLAY_CELL_SIZE) {
+
+            int bottom = top + GUAC_DISPLAY_CELL_SIZE;
+            if (bottom > area.bottom)
+                bottom = area.bottom;
+
+            int run_left = -1;
+            for (int left = area.left; left < area.right; left += GUAC_DISPLAY_CELL_SIZE) {
+
+                int right = left + GUAC_DISPLAY_CELL_SIZE;
+                if (right > area.right)
+                    right = area.right;
+
+                guac_rect cell = { .left = left, .top = top, .right = right, .bottom = bottom };
+                int differs = guac_display_video_rect_differs(display, &cell);
+
+                if (differs && run_left < 0)
+                    run_left = left;
+
+                /* End of a run of changed cells */
+                else if (!differs && run_left >= 0) {
+                    guac_rect run = { .left = run_left, .top = top, .right = left, .bottom = bottom };
+                    overflow |= guac_display_video_add_region(video, &run);
+                    run_left = -1;
+                }
+
+            }
+
+            /* Run reaching the right edge of the area */
+            if (run_left >= 0) {
+                guac_rect run = { .left = run_left, .top = top, .right = area.right, .bottom = bottom };
+                overflow |= guac_display_video_add_region(video, &run);
+            }
+
+        }
+
+        /* Too many separate regions: send their bounding box instead */
+        if (overflow) {
+            guac_rect box = video->regions[0];
+            for (int i = 1; i < video->region_count; i++)
+                guac_rect_extend(&box, &video->regions[i]);
+            guac_rect_extend(&box, dirty);
+            guac_rect_constrain(&box, bounds);
+            video->regions[0] = box;
+            video->region_count = 1;
+        }
+
+    }
+
+    /* Remember the encoded contents of what changed */
+    for (int i = 0; i < video->region_count; i++) {
+        const guac_rect* rect = &video->regions[i];
+        size_t row_length = (size_t) guac_rect_width(rect) * 4;
+        for (int y = rect->top; y < rect->bottom; y++)
+            memcpy(video->previous + (size_t) y * previous_stride + (size_t) rect->left * 4,
+                    layer->last_frame.buffer + (size_t) y * layer->last_frame.buffer_stride
+                        + (size_t) rect->left * 4,
+                    row_length);
+    }
 
 }
 
@@ -448,7 +612,7 @@ static void guac_display_video_send_packet(guac_display* display, AVPacket* pack
  * @return
  *     Zero on success, non-zero on failure.
  */
-static int guac_display_video_encode(guac_display* display, int crf) {
+static int guac_display_video_encode(guac_display* display) {
 
     guac_display_video* video = display->video;
     guac_display_layer* layer = display->default_layer;
@@ -470,9 +634,6 @@ static int guac_display_video_encode(guac_display* display, int crf) {
     video->frame->pts = pts;
     video->frame->pict_type = video->force_keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     video->force_keyframe = 0;
-
-    /* libx264 reconfigures itself when the crf option changes between frames */
-    av_opt_set_double(video->context->priv_data, "crf", crf, 0);
 
     int err = avcodec_send_frame(video->context, video->frame);
     if (err < 0) {
@@ -537,6 +698,7 @@ int PFW_LFW_guac_display_video_flush(guac_display* display) {
         return 0;
 
     int changed = !guac_rect_is_empty(&layer->last_frame.dirty);
+    int full = 0;
 
     /* Restart the stream (new stream instruction + keyframe) once a joining
      * user has been promoted and receives broadcast instructions */
@@ -567,24 +729,60 @@ int PFW_LFW_guac_display_video_flush(guac_display* display) {
             return 1;
         }
         changed = 1;
+        full = 1;
     }
 
-    int crf;
-    if (changed) {
-        crf = video->crf;
-        video->refine_due = now + GUAC_DISPLAY_VIDEO_REFINE_DELAY;
-    }
-    else if (video->refine_due && video->refine_due <= now) {
-        crf = video->refine_crf;
-        video->refine_due = 0;
-    }
-    else
+    if (!changed)
         return 0;
 
-    if (guac_display_video_encode(display, crf)) {
+    /* The parts of the layer the client should draw from this frame: the
+     * whole layer on a (re)start, the cells that actually changed otherwise */
+    guac_rect bounds = { .left = 0, .top = 0, .right = width, .bottom = height };
+    guac_rect dirty = layer->last_frame.dirty;
+    if (guac_rect_is_empty(&dirty))
+        full = 1;
+
+    guac_display_video_find_regions(display, &dirty, &bounds, full);
+
+    /* Reported changes that left the contents identical need no frame */
+    if (video->region_count == 0)
+        return 0;
+
+    if (guac_display_video_encode(display)) {
         guac_display_video_end_stream(display);
         guac_display_video_fail(display);
         return 1;
+    }
+
+    /* Whatever was just drawn from video is lossy on the client: resend it
+     * losslessly (as images, through the regular lossless refresh) once it
+     * stops changing */
+    if (!layer->pending_frame.lossless && layer->pending_frame_cells != NULL) {
+
+        for (int i = 0; i < video->region_count; i++) {
+
+            const guac_rect* rect = &video->regions[i];
+            int left = rect->left / GUAC_DISPLAY_CELL_SIZE;
+            int top = rect->top / GUAC_DISPLAY_CELL_SIZE;
+            int right = (rect->right - 1) / GUAC_DISPLAY_CELL_SIZE;
+            int bottom = (rect->bottom - 1) / GUAC_DISPLAY_CELL_SIZE;
+
+            if (right >= (int) layer->pending_frame_cells_width)
+                right = layer->pending_frame_cells_width - 1;
+            if (bottom >= (int) layer->pending_frame_cells_height)
+                bottom = layer->pending_frame_cells_height - 1;
+
+            for (int y = top; y <= bottom; y++) {
+                guac_display_layer_cell* cell = layer->pending_frame_cells
+                    + (size_t) y * layer->pending_frame_cells_width + left;
+                for (int x = left; x <= right; x++, cell++) {
+                    cell->lossy = 1;
+                    cell->last_frame = now;
+                }
+            }
+
+        }
+
     }
 
     /* Periodic statistics at debug level */
@@ -611,11 +809,8 @@ guac_timestamp guac_display_video_due(guac_display* display) {
     if (video == NULL)
         return 0;
 
-    guac_timestamp due = video->refine_due;
-
     pthread_mutex_lock(&video->restart_lock);
-    if (video->restart_due && (!due || video->restart_due < due))
-        due = video->restart_due;
+    guac_timestamp due = video->restart_due;
     pthread_mutex_unlock(&video->restart_lock);
 
     return due;
