@@ -425,6 +425,13 @@ void* guac_display_worker_thread(void* data) {
                 /* Save a copy of the changed region if the layer has
                  * been modified since the last frame */
                 guac_rect* dirty = &current->last_frame.dirty;
+
+                /* The default layer is never a copy source when streamed as
+                 * video (it is left out of the plan), so its backing buffer
+                 * need not be kept up to date */
+                if (display->video != NULL && current == display->default_layer)
+                    dirty = &(guac_rect) { 0 };
+
                 if (!guac_rect_is_empty(dirty)) {
 
                     int x = dirty->left;
