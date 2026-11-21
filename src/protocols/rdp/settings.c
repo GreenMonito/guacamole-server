@@ -742,8 +742,9 @@ enum RDP_ARGS_IDX {
 
     /**
      * The codec to stream the display with as video instead of images, if the
-     * client supports it. Only "h264" is supported. Blank (the default) sends
-     * images as usual.
+     * client supports it. Only "h264" is supported. "none" sends images. Blank
+     * uses guacd's default (the GUACD_VIDEO_DEFAULT_CODEC environment
+     * variable), or images if that isn't set.
      */
     IDX_VIDEO_CODEC,
 
@@ -927,6 +928,21 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
     settings->video_codec =
         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
                 IDX_VIDEO_CODEC, NULL);
+
+    /* A connection that doesn't set the codec gets guacd's default, if any
+     * (GUACD_VIDEO_DEFAULT_CODEC); "none" turns video off explicitly */
+    if (settings->video_codec == NULL || settings->video_codec[0] == '\0') {
+        const char* default_codec = getenv("GUACD_VIDEO_DEFAULT_CODEC");
+        guac_mem_free(settings->video_codec);
+        settings->video_codec = NULL;
+        if (default_codec != NULL && default_codec[0] != '\0'
+                && strcmp(default_codec, "none") != 0)
+            settings->video_codec = guac_strdup(default_codec);
+    }
+    else if (strcmp(settings->video_codec, "none") == 0) {
+        guac_mem_free(settings->video_codec);
+        settings->video_codec = NULL;
+    }
 
     /* Domain */
     settings->domain =
